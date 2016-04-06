@@ -31,9 +31,7 @@ impl hyper::client::Handler<HttpStream> for Dump {
         Next::read()
     }
 
-    fn on_response(&mut self, res: Response) -> Next {
-        println!("Response: {}", res.status());
-        println!("Headers:\n{}", res.headers());
+    fn on_response(&mut self, _res: Response) -> Next {
         Next::read()
     }
 
@@ -70,18 +68,29 @@ fn main() {
 
     let (tx, rx) = mpsc::channel();
     let client = Client::new().expect("Failed to create a Client");
-    client.request(url.parse().unwrap(), Dump(tx)).unwrap();
+    let to_send = 20000;
+
+    for _ in 0..to_send {
+        client.request(url.parse().unwrap(), Dump(tx.clone())).unwrap();
+    }
+
+    let sent = to_send;
 
     let mut i =-0;
+    let mut received = 0;
     loop {
         if let Ok(_) = rx.try_recv() {
-            println!("\n\nDone.");
-            break;
+            received += 1;
+            if received == sent {
+                break;
+            }
         } else {
-            ::std::thread::sleep(::std::time::Duration::from_millis(500));
+            ::std::thread::sleep(::std::time::Duration::from_millis(50));
             i += 1;
-            if i > 10 {
-                panic!("timed out");
+            if i > 100 {
+                println!("timed out while waiting for responses");
+                println!("got {} / {}", received, sent);
+                ::std::process::exit(1);
             }
         }
     }
