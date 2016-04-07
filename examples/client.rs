@@ -68,7 +68,7 @@ fn main() {
 
     let (tx, rx) = mpsc::channel();
     let client = Client::new().expect("Failed to create a Client");
-    let to_send = 20000;
+    let to_send = 2000;
 
     for _ in 0..to_send {
         client.request(url.parse().unwrap(), Dump(tx.clone())).unwrap();
@@ -76,11 +76,12 @@ fn main() {
 
     let sent = to_send;
 
-    let mut i =-0;
+    let mut i = 0;
     let mut received = 0;
     loop {
         if let Ok(_) = rx.try_recv() {
             received += 1;
+            i = 0;
             if received == sent {
                 break;
             }
