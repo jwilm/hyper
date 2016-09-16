@@ -378,7 +378,7 @@ impl<K: Key, T: Transport, H: MessageHandler<T>> ConnInner<K, T, H> {
                             // on the server to agree
                             *keep_alive = head.should_keep_alive();
                         }
-                        let mut buf = Vec::new();
+                        let mut buf = Vec::with_capacity(2048);
                         let mut encoder = <<H as MessageHandler<T>>::Message as Http1Message>::encode(head, &mut buf);
                         *writing = match interest.interest {
                             // user wants to write some data right away
