@@ -7,7 +7,8 @@ use std::collections::HashMap;
 use std::fmt;
 use std::io;
 use std::marker::PhantomData;
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -27,6 +28,40 @@ mod connect;
 mod dns;
 mod request;
 mod response;
+
+/// RAII counter which tracks number of active state machines
+///
+/// An `Arc<AtomicUsize>` is used internally since there's an unsafe `Send` impl
+/// on `ClientFsm`. It seems like the `ClientFsm` should always be pinned to one
+/// thread, but apparently it may be sent.
+///
+/// If `ClientFsm` doesn't need to be Send or are all on one thread, the
+/// internal data type could be changed to an `Rc<usize>`.
+struct Counter(Arc<AtomicUsize>);
+
+impl Counter {
+    pub fn new() -> Counter {
+        Counter(Arc::new(AtomicUsize::new()))
+    }
+
+    pub fn value(&self) -> usize {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
+impl Clone for Counter {
+    fn clone(&self) -> Counter {
+        let inner = self.0.clone();
+        inner.fetch_add(1, Ordering::AcqRel);
+        Counter(inner)
+    }
+}
+
+impl Drop for Counter {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
 
 /// A Client to make outgoing HTTP requests.
 pub struct Client<H> {
@@ -403,12 +438,13 @@ enum Notify<T> {
 }
 
 enum ClientFsm<C, H>
-where C: Connect,
-      C::Output: Transport,
-      H: Handler<C::Output> {
-    Connector(C, http::channel::Receiver<Notify<H>>),
-    Connecting((C::Key, C::Output)),
-    Socket(http::Conn<C::Key, C::Output, Message<H, C::Output>>)
+    where C: Connect,
+          C::Output: Transport,
+          H: Handler<C::Output>
+{
+    Connector(C, http::channel::Receiver<Notify<H>>, Counter),
+    Connecting((C::Key, C::Output), Counter),
+    Socket(http::Conn<C::Key, C::Output, Message<H, C::Output>>, Counter)
 }
 
 unsafe impl<C, H> Send for ClientFsm<C, H>
@@ -428,18 +464,22 @@ where C: Connect,
     type Seed = (C::Key, C::Output);
 
     fn create(seed: Self::Seed, scope: &mut Scope<Self::Context>) -> rotor::Response<Self, rotor::Void> {
+        trace!("<ClientFsm as rotor::Machine>::create");
         rotor_try!(scope.register(&seed.1, EventSet::writable(), PollOpt::level()));
         rotor::Response::ok(ClientFsm::Connecting(seed))
     }
 
     fn ready(self, events: EventSet, scope: &mut Scope<Self::Context>) -> rotor::Response<Self, Self::Seed> {
+        trace!("<ClientFsm as rotor::Machine>::ready");
         match self {
             ClientFsm::Socket(conn) => {
+                trace!("ClientFsm::Socket");
                 let res = conn.ready(events, scope);
                 let now = scope.now();
                 scope.conn_response(res, now)
             },
             ClientFsm::Connecting(mut seed) => {
+                trace!("ClientFsm::Connecting");
                 if events.is_error() || events.is_hup() {
                     if let Some(err) = seed.1.take_socket_error().err() {
                         debug!("error while connecting: {:?}", err);
@@ -474,6 +514,7 @@ where C: Connect,
     }
 
     fn spawned(self, scope: &mut Scope<Self::Context>) -> rotor::Response<Self, Self::Seed> {
+        trace!("<ClientFsm as rotor::Machine>::spawned");
         match self {
             ClientFsm::Connector(..) => self.connect(scope),
             other => rotor::Response::ok(other)
@@ -517,11 +558,14 @@ where C: Connect,
     }
 
     fn wakeup(self, scope: &mut Scope<Self::Context>) -> rotor::Response<Self, Self::Seed> {
+        trace!("<ClientFsm as rotor::Machine>::wakeup");
         match self {
             ClientFsm::Connector(..) => {
+                trace!("<ClientFsm as rotor::Machine>::wakeup ClientFsm::Connector");
                 self.connect(scope)
             },
             ClientFsm::Socket(conn) => {
+                trace!("<ClientFsm as rotor::Machine>::wakeup ClientFsm::Socket");
                 let res = conn.wakeup(scope);
                 let now = scope.now();
                 scope.conn_response(res, now)
@@ -537,13 +581,18 @@ where C: Connect,
       C::Output: Transport,
       H: Handler<C::Output> {
     fn connect(self, scope: &mut rotor::Scope<<Self as rotor::Machine>::Context>) -> rotor::Response<Self, <Self as rotor::Machine>::Seed> {
+        trace!("ClientFsm::connect");
         match self {
             ClientFsm::Connector(mut connector, rx) => {
+                trace!("ClientFsm::Connector");
                 if let Some((key, res)) = connector.connected() {
                     match res {
                         Ok(socket) => {
                             trace!("connecting {:?}", key);
-                            return rotor::Response::spawn(ClientFsm::Connector(connector, rx), (key, socket));
+                            return rotor::Response::spawn(
+                                ClientFsm::Connector(connector, rx),
+                                (key, socket)
+                            );
                         },
                         Err(e) => {
                             trace!("connect error = {:?}", e);
@@ -552,13 +601,17 @@ where C: Connect,
                     }
                 }
                 loop {
+                    trace!("rx.try_recv()");
                     match rx.try_recv() {
                         Ok(Notify::Connect(url, mut handler)) => {
+                            trace!("Notify::Connect");
                             // check pool for sockets to this domain
                             if let Some(key) = connector.key(&url) {
+                                trace!("got Some(key) = connector.key(&url)");
                                 let mut remove_idle = false;
                                 let mut woke_up = false;
                                 if let Some(mut idle) = scope.idle_conns.get_mut(&key) {
+                                    trace!("got idle connection");
                                     while !idle.is_empty() {
                                         let ctrl = idle.remove(0);
                                         // err means the socket has since died
@@ -570,6 +623,7 @@ where C: Connect,
                                     remove_idle = idle.is_empty();
                                 }
                                 if remove_idle {
+                                    trace!("removing idle conn");
                                     scope.idle_conns.remove(&key);
                                 }
 
@@ -584,11 +638,20 @@ where C: Connect,
                                     continue;
                                 }
                             } else {
+                                trace!("can't handle that url");
                                 // this connector cannot handle this url anyways
                                 let _ = handler.on_error(io::Error::new(io::ErrorKind::InvalidInput, "invalid url for connector").into());
                                 continue;
                             }
-                            // no exist connection, call connector
+
+                            // Didn't find an existing connection for this domain. If there's empty
+                            // space for another state machine, we can just kick off another
+                            // connector. If not, see if there's *any* idle connections and throw
+                            // one out before starting the new connection.
+                            //
+                            // XXX jwilm
+
+                            trace!("running connector");
                             match connector.connect(&url) {
                                 Ok(key) => {
                                     let deadline = scope.now() + scope.connect_timeout;
@@ -606,10 +669,12 @@ where C: Connect,
                             }
                         }
                         Ok(Notify::Shutdown) => {
+                            trace!("Notify::Shutdown");
                             scope.shutdown_loop();
                             return rotor::Response::done()
                         },
                         Err(mpsc::TryRecvError::Disconnected) => {
+                            trace!("Disconnected");
                             // if there is no way to send additional requests,
                             // what more can the loop do? i suppose we should
                             // shutdown.
@@ -617,6 +682,7 @@ where C: Connect,
                             return rotor::Response::done()
                         }
                         Err(mpsc::TryRecvError::Empty) => {
+                            trace!("Empty");
                             // spurious wakeup or loop is done
                             let fsm = ClientFsm::Connector(connector, rx);
                             return match fsm.deadline(scope) {
@@ -634,6 +700,7 @@ where C: Connect,
     }
 
     fn deadline(&self, scope: &mut rotor::Scope<<Self as rotor::Machine>::Context>) -> Option<rotor::Time> {
+        trace!("ClientFsm::deadline");
         match *self {
             ClientFsm::Connector(..) => {
                 let mut earliest = None;
