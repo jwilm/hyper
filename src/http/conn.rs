@@ -602,7 +602,8 @@ impl<K: Key, T: Transport, H: MessageHandler<T>> Conn<K, T, H> {
     }
 
     pub fn wakeup<F>(mut self, scope: &mut Scope<F>) -> Option<(Self, Option<Duration>)>
-    where F: MessageHandlerFactory<K, T, Output=H> {
+        where F: MessageHandlerFactory<K, T, Output=H>
+    {
         while let Ok(next) = self.0.ctrl.1.try_recv() {
             trace!("woke up with {:?}", next);
             self.0.state.update(next, &**scope);

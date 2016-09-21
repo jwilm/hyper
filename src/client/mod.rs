@@ -41,25 +41,32 @@ struct Counter(Arc<AtomicUsize>);
 
 impl Counter {
     pub fn new() -> Counter {
-        Counter(Arc::new(AtomicUsize::new()))
+        // Must be initialized to 1 due to drop impl.
+        Counter(Arc::new(AtomicUsize::new(1)))
     }
 
+    /// Return the current number of *extra* copies of the counter
+    ///
+    /// The fsm Context has a counter, but it doesn't occupy part of the slab.
+    /// To get the number of items in the slab, the value less 1 is returned.
     pub fn value(&self) -> usize {
-        self.0.load(Ordering::Acquire)
+        self.0.load(Ordering::Acquire) - 1
     }
 }
 
 impl Clone for Counter {
     fn clone(&self) -> Counter {
         let inner = self.0.clone();
-        inner.fetch_add(1, Ordering::AcqRel);
+        let prev = inner.fetch_add(1, Ordering::AcqRel);
+        println!("counter clone; total copies = {}", prev);
         Counter(inner)
     }
 }
 
 impl Drop for Counter {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::AcqRel);
+        let prev = self.0.fetch_sub(1, Ordering::AcqRel);
+        println!("counter drop; remaining copies = {}", prev - 1);
     }
 }
 
@@ -119,8 +126,11 @@ impl<H: Send> Client<H> {
         rotor_config.mio().notify_capacity(config.max_sockets);
         let keep_alive = config.keep_alive;
         let connect_timeout = config.connect_timeout;
+        let max_sockets = config.max_sockets;
         let mut loop_ = try!(rotor::Loop::new(&rotor_config));
         let mut notifier = None;
+        let count = Counter::new();
+        let connector_count = count.clone();
         let mut connector = config.connector;
         {
             let not = &mut notifier;
@@ -131,7 +141,7 @@ impl<H: Send> Client<H> {
                 connector.register(Registration {
                     notify: (dns_tx, dns_rx),
                 });
-                rotor::Response::ok(ClientFsm::Connector(connector, rx))
+                rotor::Response::ok(ClientFsm::Connector(connector, rx, connector_count))
             }).unwrap();
         }
 
@@ -142,6 +152,8 @@ impl<H: Send> Client<H> {
                 keep_alive: keep_alive,
                 idle_conns: HashMap::new(),
                 queue: HashMap::new(),
+                count: count,
+                max_sockets: max_sockets,
             }).unwrap()
         }));
 
@@ -368,6 +380,8 @@ struct Context<K, H> {
     keep_alive: bool,
     idle_conns: HashMap<K, Vec<http::Control>>,
     queue: HashMap<K, Vec<Queued<H>>>,
+    max_sockets: usize,
+    count: Counter,
 }
 
 impl<K: http::Key, H> Context<K, H> {
@@ -388,9 +402,16 @@ impl<K: http::Key, H> Context<K, H> {
         queued
     }
 
-    fn conn_response<C>(&mut self, conn: Option<(http::Conn<K, C::Output, Message<H, C::Output>>, Option<Duration>)>, time: rotor::Time)
-    -> rotor::Response<ClientFsm<C, H>, (C::Key, C::Output)>
-    where C: Connect<Key=K>, H: Handler<C::Output> {
+    fn conn_response<C>(
+        &mut self,
+        conn: Option<(http::Conn<K, C::Output, Message<H, C::Output>>, Option<Duration>)>,
+        time: rotor::Time,
+        count: Counter,
+    ) -> rotor::Response<ClientFsm<C, H>, (C::Key, C::Output)>
+        where C: Connect<Key=K>,
+              H: Handler<C::Output>
+    {
+        trace!("conn_response");
         match conn {
             Some((conn, timeout)) => {
                 //TODO: HTTP2: a connection doesn't need to be idle to be used for a second stream
@@ -399,9 +420,9 @@ impl<K: http::Key, H> Context<K, H> {
                         .push(conn.control());
                 }
                 match timeout {
-                    Some(dur) => rotor::Response::ok(ClientFsm::Socket(conn))
+                    Some(dur) => rotor::Response::ok(ClientFsm::Socket(conn, count))
                         .deadline(time + dur),
-                    None => rotor::Response::ok(ClientFsm::Socket(conn)),
+                    None => rotor::Response::ok(ClientFsm::Socket(conn, count)),
                 }
 
             }
@@ -466,19 +487,19 @@ where C: Connect,
     fn create(seed: Self::Seed, scope: &mut Scope<Self::Context>) -> rotor::Response<Self, rotor::Void> {
         trace!("<ClientFsm as rotor::Machine>::create");
         rotor_try!(scope.register(&seed.1, EventSet::writable(), PollOpt::level()));
-        rotor::Response::ok(ClientFsm::Connecting(seed))
+        rotor::Response::ok(ClientFsm::Connecting(seed, scope.count.clone()))
     }
 
     fn ready(self, events: EventSet, scope: &mut Scope<Self::Context>) -> rotor::Response<Self, Self::Seed> {
         trace!("<ClientFsm as rotor::Machine>::ready");
         match self {
-            ClientFsm::Socket(conn) => {
+            ClientFsm::Socket(conn, count) => {
                 trace!("ClientFsm::Socket");
                 let res = conn.ready(events, scope);
                 let now = scope.now();
-                scope.conn_response(res, now)
+                scope.conn_response(res, now, count)
             },
-            ClientFsm::Connecting(mut seed) => {
+            ClientFsm::Connecting(mut seed, count) => {
                 trace!("ClientFsm::Connecting");
                 if events.is_error() || events.is_hup() {
                     if let Some(err) = seed.1.take_socket_error().err() {
@@ -487,15 +508,17 @@ where C: Connect,
                         rotor::Response::done()
                     } else {
                         trace!("connecting is_error, but no socket error");
-                        rotor::Response::ok(ClientFsm::Connecting(seed))
+                        rotor::Response::ok(ClientFsm::Connecting(seed, count))
                     }
                 } else if events.is_writable() {
                     if scope.queue.contains_key(&seed.0) {
                         trace!("connected and writable {:?}", seed.0);
+                        let next = Next::write().timeout(scope.connect_timeout);
                         rotor::Response::ok(
                             ClientFsm::Socket(
-                                http::Conn::new(seed.0, seed.1, Next::write().timeout(scope.connect_timeout), scope.notifier())
-                                    .keep_alive(scope.keep_alive)
+                                http::Conn::new(seed.0, seed.1, next, scope.notifier())
+                                    .keep_alive(scope.keep_alive),
+                                count
                             )
                         )
                     } else {
@@ -504,7 +527,7 @@ where C: Connect,
                     }
                 } else {
                     // spurious?
-                    rotor::Response::ok(ClientFsm::Connecting(seed))
+                    rotor::Response::ok(ClientFsm::Connecting(seed, count))
                 }
             }
             ClientFsm::Connector(..) => {
@@ -519,6 +542,15 @@ where C: Connect,
             ClientFsm::Connector(..) => self.connect(scope),
             other => rotor::Response::ok(other)
         }
+    }
+
+    fn spawn_error(
+        self,
+        _scope: &mut Scope<Self::Context>,
+        error: rotor::SpawnError<Self::Seed>
+    ) -> rotor::Response<Self, Self::Seed> {
+        // XXX make this not a panic
+        panic!("Error spawning state machine: {}", error);
     }
 
     fn timeout(self, scope: &mut Scope<Self::Context>) -> rotor::Response<Self, Self::Seed> {
@@ -549,10 +581,10 @@ where C: Connect,
                 }
             }
             ClientFsm::Connecting(..) => unreachable!(),
-            ClientFsm::Socket(conn) => {
+            ClientFsm::Socket(conn, count) => {
                 let res = conn.timeout(scope);
                 let now = scope.now();
-                scope.conn_response(res, now)
+                scope.conn_response(res, now, count)
             }
         }
     }
@@ -564,11 +596,11 @@ where C: Connect,
                 trace!("<ClientFsm as rotor::Machine>::wakeup ClientFsm::Connector");
                 self.connect(scope)
             },
-            ClientFsm::Socket(conn) => {
+            ClientFsm::Socket(conn, count) => {
                 trace!("<ClientFsm as rotor::Machine>::wakeup ClientFsm::Socket");
                 let res = conn.wakeup(scope);
                 let now = scope.now();
-                scope.conn_response(res, now)
+                scope.conn_response(res, now, count)
             },
             ClientFsm::Connecting(..) => unreachable!("connecting sockets should not be woken up")
         }
@@ -583,14 +615,14 @@ where C: Connect,
     fn connect(self, scope: &mut rotor::Scope<<Self as rotor::Machine>::Context>) -> rotor::Response<Self, <Self as rotor::Machine>::Seed> {
         trace!("ClientFsm::connect");
         match self {
-            ClientFsm::Connector(mut connector, rx) => {
+            ClientFsm::Connector(mut connector, rx, count) => {
                 trace!("ClientFsm::Connector");
                 if let Some((key, res)) = connector.connected() {
                     match res {
                         Ok(socket) => {
                             trace!("connecting {:?}", key);
                             return rotor::Response::spawn(
-                                ClientFsm::Connector(connector, rx),
+                                ClientFsm::Connector(connector, rx, count),
                                 (key, socket)
                             );
                         },
@@ -651,6 +683,45 @@ where C: Connect,
                             //
                             // XXX jwilm
 
+                            if scope.count.value() >= scope.max_sockets {
+                                trace!("attempting to remove an idle socket");
+                                // Remove an idle connection. Any connection. Just make some space
+                                // for the new request.
+                                let mut remove_keys = Vec::new();
+                                let mut found = false;
+
+                                // Check all idle connections regardless of origin
+                                for (key, idle) in scope.idle_conns.iter_mut() {
+                                    while let Some(ctrl) = idle.pop() {
+                                        // Signal connection to close. An err here means the
+                                        // socket is already dead can should be tossed.
+                                        if ctrl.ready(Next::remove()).is_ok() {
+                                            found = true;
+                                            break;
+                                        }
+                                    }
+
+                                    // This list is empty, mark it for removal
+                                    if idle.is_empty() {
+                                        remove_keys.push(key.to_owned());
+                                    }
+
+                                    // if found, stop looking for an idle connection.
+                                    if found {
+                                        break;
+                                    }
+                                }
+
+                                debug!("idle conns: {:?}", scope.idle_conns);
+
+                                // Remove empty idle lists.
+                                for key in &remove_keys {
+                                    scope.idle_conns.remove(&key);
+                                }
+                            }
+
+                            // XXX add counter to queued since they essentiall have "reserved" a
+                            // state machine slot.
                             trace!("running connector");
                             match connector.connect(&url) {
                                 Ok(key) => {
@@ -684,7 +755,7 @@ where C: Connect,
                         Err(mpsc::TryRecvError::Empty) => {
                             trace!("Empty");
                             // spurious wakeup or loop is done
-                            let fsm = ClientFsm::Connector(connector, rx);
+                            let fsm = ClientFsm::Connector(connector, rx, count);
                             return match fsm.deadline(scope) {
                                 Some(deadline) => {
                                     rotor::Response::ok(fsm).deadline(deadline)
