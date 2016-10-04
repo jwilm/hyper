@@ -125,12 +125,8 @@ impl<H: Send> Client<H> {
     /// If the event loop thread has died, or the queue is full, a `ClientError`
     /// will be returned.
     pub fn request(&self, url: Url, handler: H) -> Result<(), ClientError<H>> {
-        self.tx.send(Notify::Connect(url, handler)).map_err(|e| {
-            match e.0 {
-                Some(Notify::Connect(url, handler)) => ClientError(Some((url, handler))),
-                _ => ClientError(None)
-            }
-        })
+        try!(self.tx.send(Notify::Connect(url, handler)));
+        Ok(())
     }
 
     /// Close the Client loop.
@@ -237,27 +233,76 @@ impl Default for Config<DefaultConnector> {
     }
 }
 
+
 /// An error that can occur when trying to queue a request.
 #[derive(Debug)]
-pub struct ClientError<H>(Option<(Url, H)>);
+pub enum ClientError<H> {
+    /// Detected disconnection when sending Notify::Connect
+    Disconnected {
+        /// `Url` for request
+        url: Url,
+        /// `Handler` for request
+        handler: H
+    },
 
-impl<H> ClientError<H> {
-    /// If the event loop was down, the `Url` and `Handler` can be recovered
-    /// from this method.
-    pub fn recover(self) -> Option<(Url, H)> {
-        self.0
-    }
+    /// Detected disconnection when sending Notify::Shutdown
+    ShutdownDisconnection,
+
+    /// The event loop was full. The Notify was added to the queue and will
+    /// probably be consumed.
+    EventLoopFull,
+
+    /// The event loop has closed
+    EventLoopClosed,
+
+    /// io::Error waking the loop
+    EventLoopIo,
 }
 
 impl<H: fmt::Debug + ::std::any::Any> ::std::error::Error for ClientError<H> {
+    fn cause(&self) -> Option<&::std::error::Error> {
+        None
+    }
+
     fn description(&self) -> &str {
-        "Cannot queue request"
+        match *self {
+            ClientError::Disconnected { .. } => "client thread is gone",
+            ClientError::ShutdownDisconnection => "client thread is gone",
+            ClientError::EventLoopFull => "event loop cannot receive messages at this time",
+            ClientError::EventLoopClosed => "event loop is gone",
+            ClientError::EventLoopIo => "io error waking the loop",
+        }
     }
 }
 
 impl<H> fmt::Display for ClientError<H> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.write_str("Cannot queue request")
+        f.write_str( "Cannot queue request")
+    }
+}
+
+impl<H> From<http::channel::SendError<Notify<H>>> for ClientError<H> {
+    fn from(err: http::channel::SendError<Notify<H>>) -> ClientError<H> {
+        use http::channel::SendError;
+        use rotor::WakeupError;
+
+        match err {
+            SendError::Disconnected(mpsc_send_err) => {
+                match mpsc_send_err.0 {
+                    Notify::Connect(url, handler) => {
+                        ClientError::Disconnected { url: url, handler: handler }
+                    },
+                    Notify::Shutdown => ClientError::ShutdownDisconnection,
+                }
+            },
+            SendError::Rotor(rotor_err) => {
+                match rotor_err {
+                    WakeupError::Io => ClientError::EventLoopIo,
+                    WakeupError::Full => ClientError::EventLoopFull,
+                    WakeupError::Closed => ClientError::EventLoopClosed,
+                }
+            }
+        }
     }
 }
 
@@ -432,6 +477,15 @@ impl<K, H, T, C> http::MessageHandlerFactory<K, T> for Context<K, H, C>
 enum Notify<T> {
     Connect(Url, T),
     Shutdown,
+}
+
+impl<T> fmt::Debug for Notify<T> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match *self {
+            Notify::Connect(..) => f.write_str("Notify::Connect"),
+            Notify::Shutdown => f.write_str("Notify::Shutdown"),
+        }
+    }
 }
 
 enum ClientFsm<C, H>

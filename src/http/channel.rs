@@ -69,17 +69,48 @@ impl<T> fmt::Debug for Sender<T> {
 }
 
 #[derive(Debug)]
-pub struct SendError<T>(pub Option<T>);
+pub enum SendError<T> {
+    /// Disconnected from the client thread
+    Disconnected(mpsc::SendError<T>),
+
+    /// Error notifying the event loop
+    Rotor(rotor::WakeupError),
+}
+
+impl<T: fmt::Debug + ::std::any::Any + Send> ::std::error::Error for SendError<T> {
+    fn cause(&self) -> Option<&::std::error::Error> {
+        match *self {
+            SendError::Disconnected(ref err) => Some(err),
+            SendError::Rotor(ref err) => Some(err),
+        }
+    }
+
+    fn description(&self) -> &str {
+        match *self {
+            SendError::Disconnected(_) => "receiver disconnected",
+            SendError::Rotor(ref err) => err.description(),
+        }
+    }
+}
+
+impl<T> ::std::fmt::Display for SendError<T> {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
+        match *self {
+            SendError::Disconnected(..) => f.write_str("sender disconnected from receiver"),
+            SendError::Rotor(ref err) => write!(f, "Failed to send to event loop: {}", err),
+        }
+    }
+}
 
 impl<T> From<mpsc::SendError<T>> for SendError<T> {
-    fn from(e: mpsc::SendError<T>) -> SendError<T> {
-        SendError(Some(e.0))
+    fn from(err: mpsc::SendError<T>) -> SendError<T> {
+        SendError::Disconnected(err)
     }
 }
 
 impl<T> From<rotor::WakeupError> for SendError<T> {
-    fn from(_e: rotor::WakeupError) -> SendError<T> {
-        SendError(None)
+    fn from(err: rotor::WakeupError) -> SendError<T> {
+        SendError::Rotor(err)
     }
 }
 
