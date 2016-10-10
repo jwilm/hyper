@@ -554,7 +554,7 @@ impl<K: Key, T: Transport, H: MessageHandler<T>> Conn<K, T, H> {
         }
 
         if events.is_hup() {
-            trace!("Conn::ready got hangup")
+            trace!("Conn::ready got hangup");
             let _ = scope.deregister(&self.0.transport);
             self.on_remove();
             return ReadyResult::Done(None);
