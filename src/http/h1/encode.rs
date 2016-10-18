@@ -99,6 +99,7 @@ impl Encoder {
     }
 
     pub fn encode<W: AtomicWrite>(&mut self, w: &mut W, msg: &[u8]) -> io::Result<usize> {
+        trace!("Encoder::encode");
         match self.kind {
             Kind::Chunked(ref mut chunked) => {
                 chunked.encode(w, &mut self.prefix, msg)
@@ -139,6 +140,7 @@ enum Chunked {
 
 impl Chunked {
     fn encode<W: AtomicWrite>(&mut self, w: &mut W, prefix: &mut Prefix, msg: &[u8]) -> io::Result<usize> {
+        trace!("Chunked::encode");
         match *self {
             Chunked::Init => {
                 let mut size = ChunkSize {
@@ -201,8 +203,11 @@ impl Chunked {
                 ],
                 Chunked::End => unreachable!("Chunked::End shouldn't write more")
             };
+            trace!("try write_atomic");
             try!(w.write_atomic(&pieces))
         };
+
+        trace!("Chunked::encode wrote {} bytes", n);
 
         if n > 0 {
             n = prefix.update(n);
@@ -279,6 +284,7 @@ struct ChunkSize {
 
 impl ChunkSize {
     fn update(&mut self, n: usize) -> usize {
+        trace!("ChunkSize::update n={}", n);
         let diff = (self.len - self.pos).into();
         if n >= diff {
             self.pos = 0;

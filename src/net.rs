@@ -591,7 +591,7 @@ mod openssl {
     impl<T: super::Transport> io::Write for OpensslStream<T> {
         fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
             self.blocked = None;
-            self.stream.ssl_write(buf).or_else(|e| match e {
+            let res = self.stream.ssl_write(buf).or_else(|e| match e {
                 OpensslError::ZeroReturn => Ok(0),
                 OpensslError::WantRead(e) => {
                     self.blocked = Some(Blocked::Read);
@@ -599,7 +599,10 @@ mod openssl {
                 },
                 OpensslError::WantWrite(e) | OpensslError::Stream(e) => Err(e),
                 e => Err(io::Error::new(io::ErrorKind::Other, e))
-            })
+            });
+
+            trace!("openssl res = {:?}; blocked={:?}", res, self.blocked);
+            res
         }
 
         fn flush(&mut self) -> io::Result<()> {
@@ -635,6 +638,10 @@ mod openssl {
     impl<T: super::Transport> super::Transport for OpensslStream<T> {
         fn take_socket_error(&mut self) -> io::Result<()> {
             self.stream.get_mut().take_socket_error()
+        }
+
+        fn blocked(&self) -> Option<super::Blocked> {
+            self.blocked
         }
     }
 }
