@@ -642,7 +642,11 @@ impl<K: Key, T: Transport, H: MessageHandler<T>> Conn<K, T, H> {
             self.0.on_writable(scope);
         }
 
-        let mut events = match self.0.register() {
+        if events.is_readable() && self.0.can_read_more(was_init) {
+            return ReadyResult::Continue(self);
+        }
+
+        let events = match self.0.register() {
             Reg::Read => EventSet::readable(),
             Reg::Write => EventSet::writable(),
             Reg::ReadWrite => EventSet::readable() | EventSet::writable(),
@@ -653,13 +657,7 @@ impl<K: Key, T: Transport, H: MessageHandler<T>> Conn<K, T, H> {
                 self.on_remove();
                 return ReadyResult::Done(None);
             },
-        };
-
-        if events.is_readable() && self.0.can_read_more(was_init) {
-            return ReadyResult::Continue(self);
-        }
-
-        events = events | EventSet::hup();
+        } | EventSet::hup();
 
         trace!("scope.reregister({:?})", events);
         match scope.reregister(&self.0.transport, events, PollOpt::level()) {
