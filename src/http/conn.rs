@@ -595,13 +595,6 @@ impl<K: Key, T: Transport, H: MessageHandler<T>> Conn<K, T, H> {
             }
         }
 
-        if events.is_hup() {
-            trace!("Conn::ready got hangup");
-            let _ = scope.deregister(&self.0.transport);
-            self.on_remove();
-            return ReadyResult::Done(None);
-        }
-
         // if the user had an io interest, but the transport was blocked differently,
         // the event needs to be translated to what the user was actually expecting.
         //
@@ -644,6 +637,13 @@ impl<K: Key, T: Transport, H: MessageHandler<T>> Conn<K, T, H> {
 
         if events.is_readable() && self.0.can_read_more(was_init) {
             return ReadyResult::Continue(self);
+        }
+
+        if events.is_hup() {
+            trace!("Conn::ready got hangup");
+            let _ = scope.deregister(&self.0.transport);
+            self.on_remove();
+            return ReadyResult::Done(None);
         }
 
         let events = match self.0.register() {
