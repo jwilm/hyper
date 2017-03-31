@@ -3,6 +3,8 @@ use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::thread;
 use std::vec;
 
+use c_ares_experiment;
+
 use ::spmc;
 
 use http::channel;
@@ -10,6 +12,7 @@ use http::channel;
 pub struct Dns {
     tx: spmc::Sender<String>,
     rx: channel::Receiver<Answer>,
+    c_ares: c_ares_experiment::Dns,
 }
 
 pub type Answer = (String, io::Result<IpAddrs>);
@@ -32,14 +35,18 @@ impl Dns {
         for _ in 0..threads {
             work(rx.clone(), notify.0.clone());
         }
+
         Dns {
             tx: tx,
             rx: notify.1,
+            c_ares: c_ares_experiment::Dns::new(move |res| trace!("c-ares response: {:?}", res)),
         }
     }
 
     pub fn resolve<T: Into<String>>(&self, hostname: T) {
-        self.tx.send(hostname.into()).expect("DNS workers all died unexpectedly");
+        let hostname = hostname.into();
+        self.c_ares.resolve(hostname.clone());
+        self.tx.send(hostname).expect("DNS workers all died unexpectedly");
     }
 
     pub fn resolved(&self) -> Result<Answer, channel::TryRecvError> {

@@ -24,6 +24,10 @@ unicase = "1.0"
 url = "1.0"
 vecio = "0.1"
 
+[dependencies.c-ares-experiment]
+branch = "master"
+git = "https://github.com/hiptic/c-ares-experiment"
+
 [dependencies.cookie]
 version = "0.3"
 default-features = false

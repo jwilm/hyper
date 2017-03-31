@@ -1,6 +1,5 @@
 #![doc(html_root_url = "https://hyperium.github.io/hyper/")]
 #![deny(missing_docs)]
-#![deny(warnings)]
 #![deny(missing_debug_implementations)]
 #![cfg_attr(all(test, feature = "nightly"), feature(test))]
 
@@ -33,7 +32,8 @@ extern crate rotor;
 extern crate spmc;
 extern crate vecio;
 
-#[macro_use]
+extern crate c_ares_experiment;
+
 extern crate language_tags;
 
 #[macro_use]
