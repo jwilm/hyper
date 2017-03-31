@@ -1,16 +1,12 @@
 use std::io;
-use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
-use std::thread;
+use std::net::IpAddr;
 use std::vec;
 
 use c_ares_experiment;
 
-use ::spmc;
-
 use http::channel;
 
 pub struct Dns {
-    tx: spmc::Sender<String>,
     rx: channel::Receiver<Answer>,
     c_ares: c_ares_experiment::Dns,
 }
@@ -18,86 +14,38 @@ pub struct Dns {
 pub type Answer = (String, io::Result<IpAddrs>);
 
 pub struct IpAddrs {
-    iter: vec::IntoIter<SocketAddr>,
+    iter: vec::IntoIter<IpAddr>,
 }
 
 impl Iterator for IpAddrs {
     type Item = IpAddr;
     #[inline]
     fn next(&mut self) -> Option<IpAddr> {
-        self.iter.next().map(|addr| addr.ip())
+        self.iter.next()
     }
 }
 
 impl Dns {
-    pub fn new(notify: (channel::Sender<Answer>, channel::Receiver<Answer>), threads: usize) -> Dns {
-        let (tx, rx) = spmc::channel();
-        for _ in 0..threads {
-            work(rx.clone(), notify.0.clone());
-        }
+    pub fn new(notify: (channel::Sender<Answer>, channel::Receiver<Answer>), _threads: usize) -> Dns {
+        let (tx, rx) = notify;
 
         Dns {
-            tx: tx,
-            rx: notify.1,
-            c_ares: c_ares_experiment::Dns::new(move |res| trace!("c-ares response: {:?}", res)),
+            rx: rx,
+            c_ares: c_ares_experiment::Dns::new(move |res| {
+                let (host, res) = res;
+                let res = res.map(|v| IpAddrs { iter: v.into_iter() });
+                let _ = tx.send((host.into_owned(), res));
+            })
         }
     }
 
     pub fn resolve<T: Into<String>>(&self, hostname: T) {
         let hostname = hostname.into();
-        self.c_ares.resolve(hostname.clone());
-        self.tx.send(hostname).expect("DNS workers all died unexpectedly");
+        self.c_ares.resolve(hostname.clone())
+            .expect("DNS worker died unexpectedly");
     }
 
     pub fn resolved(&self) -> Result<Answer, channel::TryRecvError> {
         self.rx.try_recv()
-    }
-}
-
-fn work(rx: spmc::Receiver<String>, notify: channel::Sender<Answer>) {
-    thread::Builder::new().name(String::from("hyper-dns")).spawn(move || {
-        let mut worker = Worker::new(rx, notify);
-        let rx = worker.rx.as_ref().expect("Worker lost rx");
-        let notify = worker.notify.as_ref().expect("Worker lost notify");
-        while let Ok(host) = rx.recv() {
-            debug!("resolve {:?}", host);
-            let res = match (&*host, 80).to_socket_addrs().map(|i| IpAddrs{ iter: i }) {
-                Ok(addrs) => (host, Ok(addrs)),
-                Err(e) => (host, Err(e))
-            };
-
-            if let Err(_) = notify.send(res) {
-                break;
-            }
-        }
-        worker.shutdown = true;
-    }).expect("spawn dns thread");
-}
-
-struct Worker {
-    rx: Option<spmc::Receiver<String>>,
-    notify: Option<channel::Sender<Answer>>,
-    shutdown: bool,
-}
-
-impl Worker {
-    fn new(rx: spmc::Receiver<String>, notify: channel::Sender<Answer>) -> Worker {
-        Worker {
-            rx: Some(rx),
-            notify: Some(notify),
-            shutdown: false,
-        }
-    }
-}
-
-impl Drop for Worker {
-    fn drop(&mut self) {
-        if !self.shutdown {
-            trace!("Worker.drop panicked, restarting");
-            work(self.rx.take().expect("Worker lost rx"),
-                self.notify.take().expect("Worker lost notify"));
-        } else {
-            trace!("Worker.drop shutdown, closing");
-        }
     }
 }
