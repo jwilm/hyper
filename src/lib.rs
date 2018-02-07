@@ -25,15 +25,17 @@ extern crate openssl_verify;
 extern crate security_framework;
 #[cfg(feature = "serde-serialization")]
 extern crate serde;
+
 extern crate cookie;
-extern crate unicase;
 extern crate httparse;
 extern crate rotor;
 extern crate spmc;
+extern crate unicase;
 extern crate vecio;
 
 extern crate c_ares_experiment;
 
+#[macro_use]
 extern crate language_tags;
 
 #[macro_use]

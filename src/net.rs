@@ -3,8 +3,8 @@ use std::io::{self, Read, Write};
 use std::net::{SocketAddr};
 use std::option;
 
-use rotor::mio::tcp::{TcpStream, TcpListener};
 use rotor::mio::{Selector, Token, Evented, EventSet, PollOpt, TryAccept};
+use rotor::mio::tcp::{TcpStream, TcpListener};
 
 #[cfg(feature = "openssl")]
 pub use self::openssl::{Openssl, OpensslStream};
@@ -437,11 +437,9 @@ mod openssl {
 
     use rotor::mio::{Selector, Token, Evented, EventSet, PollOpt};
 
-    use openssl::ssl::{Ssl, SslContext, SslStream, SslMethod, SSL_VERIFY_PEER, SSL_OP_NO_SSLV2, SSL_OP_NO_SSLV3, SSL_OP_NO_COMPRESSION};
-    use openssl::ssl::error::StreamError as SslIoError;
-    use openssl::ssl::error::SslError;
-    use openssl::ssl::error::Error as OpensslError;
-    use openssl::x509::X509FileType;
+    use error::Error;
+    use openssl::error::ErrorStack;
+    use openssl::ssl::{ErrorCode, SslVerifyMode, Ssl, SslFiletype, SslContext, SslMethod, SslStream, SslOptions};
 
     use super::{HttpStream, Blocked};
 
@@ -471,13 +469,13 @@ mod openssl {
 
     impl Default for OpensslClient {
         fn default() -> OpensslClient {
-            let mut ctx = SslContext::new(SslMethod::Sslv23).unwrap();
+            let mut ctx = SslContext::builder(SslMethod::tls()).unwrap();
             ctx.set_default_verify_paths().unwrap();
-            ctx.set_options(SSL_OP_NO_SSLV2 | SSL_OP_NO_SSLV3 | SSL_OP_NO_COMPRESSION);
+            ctx.set_options(SslOptions::NO_SSLV2 | SslOptions::NO_SSLV3 | SslOptions::NO_COMPRESSION);
             // cipher list taken from curl:
             // https://github.com/curl/curl/blob/5bf5f6ebfcede78ef7c2b16daa41c4b7ba266087/lib/vtls/openssl.h#L120
             ctx.set_cipher_list("ALL!EXPORT!EXPORT40!EXPORT56!aNULL!LOW!RC4@STRENGTH").unwrap();
-            OpensslClient::new(ctx)
+            OpensslClient::new(ctx.build())
         }
     }
 
@@ -496,8 +494,8 @@ mod openssl {
             let mut ssl = try!(Ssl::new(&self.0));
             try!(ssl.set_hostname(host));
             let host = host.to_owned();
-            ssl.set_verify_callback(SSL_VERIFY_PEER, move |p, x| ::openssl_verify::verify_callback(&host, p, x));
-            SslStream::connect(ssl, stream)
+            ssl.set_verify_callback(SslVerifyMode::PEER, move |p, x| ::openssl_verify::verify_callback(&host, p, x));
+            ssl.connect(stream)
                 .map(openssl_stream)
                 .map_err(From::from)
         }
@@ -507,7 +505,7 @@ mod openssl {
         fn wrap_client(&self, stream: HttpStream, host: &str) -> ::Result<Self::Stream> {
             let mut ssl = try!(Ssl::new(&self.0));
             try!(ssl.set_hostname(host));
-            SslStream::connect(ssl, stream)
+            ssl.connect(stream)
                 .map(openssl_stream)
                 .map_err(From::from)
         }
@@ -516,24 +514,24 @@ mod openssl {
     impl Default for Openssl {
         fn default() -> Openssl {
             Openssl {
-                context: SslContext::new(SslMethod::Sslv23).unwrap_or_else(|e| {
+                context: SslContext::builder(SslMethod::tls()).unwrap_or_else(|e| {
                     // if we cannot create a SslContext, that's because of a
                     // serious problem. just crash.
                     panic!("{}", e)
-                })
+                }).build()
             }
         }
     }
 
     impl Openssl {
         /// Ease creating an `Openssl` with a certificate and key.
-        pub fn with_cert_and_key<C, K>(cert: C, key: K) -> Result<Openssl, SslError>
+        pub fn with_cert_and_key<C, K>(cert: C, key: K) -> Result<Openssl, ErrorStack>
         where C: AsRef<Path>, K: AsRef<Path> {
-            let mut ctx = try!(SslContext::new(SslMethod::Sslv23));
+            let mut ctx = try!(SslContext::builder(SslMethod::tls()));
             try!(ctx.set_cipher_list("ALL!EXPORT!EXPORT40!EXPORT56!aNULL!LOW!RC4@STRENGTH"));
-            try!(ctx.set_certificate_file(cert.as_ref(), X509FileType::PEM));
-            try!(ctx.set_private_key_file(key.as_ref(), X509FileType::PEM));
-            Ok(Openssl { context: ctx })
+            try!(ctx.set_certificate_file(cert.as_ref(), SslFiletype::PEM));
+            try!(ctx.set_private_key_file(key.as_ref(), SslFiletype::PEM));
+            Ok(Openssl { context: ctx.build() })
         }
     }
 
@@ -541,19 +539,17 @@ mod openssl {
         type Stream = OpensslStream<HttpStream>;
 
         fn wrap_client(&self, stream: HttpStream, host: &str) -> ::Result<Self::Stream> {
-            let ssl = try!(Ssl::new(&self.context));
+            let mut ssl = try!(Ssl::new(&self.context));
             try!(ssl.set_hostname(host));
-            SslStream::connect(ssl, stream)
+            ssl.connect(stream)
                 .map(openssl_stream)
                 .map_err(From::from)
         }
 
         fn wrap_server(&self, stream: HttpStream) -> ::Result<Self::Stream> {
-            match SslStream::accept(&self.context, stream) {
+            let ssl = try!(Ssl::new(&self.context));
+            match ssl.accept(stream) {
                 Ok(ssl_stream) => Ok(openssl_stream(ssl_stream)),
-                Err(SslIoError(e)) => {
-                    Err(io::Error::new(io::ErrorKind::ConnectionAborted, e).into())
-                },
                 Err(e) => Err(e.into())
             }
         }
@@ -576,30 +572,28 @@ mod openssl {
     impl<T: super::Transport> io::Read for OpensslStream<T> {
         fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
             self.blocked = None;
-            self.stream.ssl_read(buf).or_else(|e| match e {
-                OpensslError::ZeroReturn => Ok(0),
-                OpensslError::WantWrite(e) => {
+            self.stream.ssl_read(buf).or_else(|e| match e.code() {
+                ErrorCode::ZERO_RETURN => Ok(0),
+                ErrorCode::WANT_WRITE => {
                     self.blocked = Some(Blocked::Write);
                     Err(e)
                 },
-                OpensslError::WantRead(e) | OpensslError::Stream(e) => Err(e),
-                e => Err(io::Error::new(io::ErrorKind::Other, e))
-            })
+                _ => Err(e),
+            }).map_err(|e| io::Error::new(io::ErrorKind::Other, Error::Ssl(e)))
         }
     }
 
     impl<T: super::Transport> io::Write for OpensslStream<T> {
         fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
             self.blocked = None;
-            self.stream.ssl_write(buf).or_else(|e| match e {
-                OpensslError::ZeroReturn => Ok(0),
-                OpensslError::WantRead(e) => {
+            self.stream.ssl_write(buf).or_else(|e| match e.code() {
+                ErrorCode::ZERO_RETURN => Ok(0),
+                ErrorCode::WANT_READ => {
                     self.blocked = Some(Blocked::Read);
                     Err(e)
                 },
-                OpensslError::WantWrite(e) | OpensslError::Stream(e) => Err(e),
-                e => Err(io::Error::new(io::ErrorKind::Other, e))
-            })
+                _ => Err(e),
+            }).map_err(|e| io::Error::new(io::ErrorKind::Other, Error::Ssl(e)))
         }
 
         fn flush(&mut self) -> io::Result<()> {
