@@ -33,11 +33,11 @@ version = "0.3"
 default-features = false
 
 [dependencies.openssl]
-version = "0.7"
+version = "0.10"
 optional = true
 
 [dependencies.openssl-verify]
-version = "0.1"
+git = "https://github.com/DarrenTsung/rust-openssl-verify"
 optional = true
 
 [dependencies.security-framework]
