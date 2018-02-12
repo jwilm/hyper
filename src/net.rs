@@ -644,11 +644,15 @@ mod openssl {
                                 blocked.set(Some(Blocked::Write));
                                 Err(e)
                             },
+                            ErrorCode::WANT_READ => {
+                                blocked.set(Some(Blocked::Read));
+                                Err(e)
+                            },
                             _ => Err(e),
                         }).map_err(|e| {
                             debug!("read - connected error: {:?}", e);
                             match e.code() {
-                                ErrorCode::WANT_WRITE => io::Error::new(io::ErrorKind::WouldBlock, Error::Ssl(e)),
+                                ErrorCode::WANT_WRITE | ErrorCode::WANT_READ => io::Error::new(io::ErrorKind::WouldBlock, Error::Ssl(e)),
                                 _ => io::Error::new(io::ErrorKind::Other, Error::Ssl(e)),
                             }
                         });
@@ -695,11 +699,15 @@ mod openssl {
                                 blocked.set(Some(Blocked::Read));
                                 Err(e)
                             },
+                            ErrorCode::WANT_WRITE => {
+                                blocked.set(Some(Blocked::Write));
+                                Err(e)
+                            },
                             _ => Err(e),
                         }).map_err(|e| {
                             debug!("write - connected error: {:?}", e);
                             match e.code() {
-                                ErrorCode::WANT_READ => io::Error::new(io::ErrorKind::WouldBlock, Error::Ssl(e)),
+                                ErrorCode::WANT_WRITE | ErrorCode::WANT_READ => io::Error::new(io::ErrorKind::WouldBlock, Error::Ssl(e)),
                                 _ => io::Error::new(io::ErrorKind::Other, Error::Ssl(e)),
                             }
                         });
