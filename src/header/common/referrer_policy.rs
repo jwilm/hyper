@@ -1,5 +1,4 @@
 use std::fmt;
-use std::ascii::AsciiExt;
 
 use header::{Header, Raw, parsing};
 

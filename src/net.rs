@@ -433,13 +433,16 @@ pub type DefaultTransport = <DefaultConnector as Connect>::Output;
 #[cfg(feature = "openssl")]
 mod openssl {
     use std::io::{self, Write};
+    use std::cell::Cell;
     use std::path::Path;
+    use std::rc::Rc;
 
     use rotor::mio::{Selector, Token, Evented, EventSet, PollOpt};
 
     use error::Error;
     use openssl::error::ErrorStack;
-    use openssl::ssl::{ErrorCode, SslVerifyMode, Ssl, SslFiletype, SslContext, SslMethod, SslStream, SslOptions};
+    use openssl::ssl::{ErrorCode, SslVerifyMode, Ssl, SslFiletype,
+        SslContext, SslMethod, SslStream, SslOptions, HandshakeError};
 
     use super::{HttpStream, Blocked};
 
@@ -541,9 +544,11 @@ mod openssl {
         fn wrap_client(&self, stream: HttpStream, host: &str) -> ::Result<Self::Stream> {
             let mut ssl = try!(Ssl::new(&self.context));
             try!(ssl.set_hostname(host));
-            ssl.connect(stream)
-                .map(openssl_stream)
-                .map_err(From::from)
+            match ssl.connect(stream) {
+                Ok(stream) => Ok(openssl_stream(stream)),
+                Err(HandshakeError::WouldBlock(stream)) => Ok(mid_openssl_stream(stream)),
+                Err(err) => Err(From::from(err)),
+            }
         }
 
         fn wrap_server(&self, stream: HttpStream) -> ::Result<Self::Stream> {
@@ -555,87 +560,198 @@ mod openssl {
         }
     }
 
+
+    use ::openssl::ssl::MidHandshakeSslStream;
+    use std::fmt::Debug;
+
+    #[derive(Debug)]
+    enum OpensslStreamInner<T> where T: Debug {
+        Connected(SslStream<T>),
+        Connecting(MidHandshakeSslStream<T>),
+    }
+
     /// A transport protected by OpenSSL.
     #[derive(Debug)]
-    pub struct OpensslStream<T> {
-        stream: SslStream<T>,
-        blocked: Option<Blocked>,
+    pub struct OpensslStream<T> where T: Debug {
+        inner: Option<OpensslStreamInner<T>>,
+        blocked: Rc<Cell<Option<Blocked>>>,
     }
 
-    fn openssl_stream<T>(inner: SslStream<T>) -> OpensslStream<T> {
+    fn mid_openssl_stream<T: Debug>(stream: MidHandshakeSslStream<T>) -> OpensslStream<T> {
         OpensslStream {
-            stream: inner,
-            blocked: None,
+            inner: Some(OpensslStreamInner::Connecting(stream)),
+            blocked: Rc::new(Cell::new(None)),
         }
     }
 
-    impl<T: super::Transport> io::Read for OpensslStream<T> {
+    fn openssl_stream<T: Debug>(stream: SslStream<T>) -> OpensslStream<T> {
+        OpensslStream {
+            inner: Some(OpensslStreamInner::Connected(stream)),
+            blocked: Rc::new(Cell::new(None)),
+        }
+    }
+
+    impl<T: super::Transport + Debug> OpensslStream<T> {
+        fn inner_stream_ref(&self) -> &T {
+            match self.inner.as_ref().expect("Inner exists!") {
+                &OpensslStreamInner::Connecting(ref stream) => stream.get_ref(),
+                &OpensslStreamInner::Connected(ref stream) => stream.get_ref(),
+            }
+        }
+
+        fn inner_stream_mut(&mut self) -> &mut T {
+            match self.inner.as_mut().expect("Inner exists!") {
+                &mut OpensslStreamInner::Connecting(ref mut stream) => stream.get_mut(),
+                &mut OpensslStreamInner::Connected(ref mut stream) => stream.get_mut(),
+            }
+        }
+    }
+
+    impl<T: super::Transport + Debug> io::Read for OpensslStream<T> {
         fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            self.blocked = None;
-            self.stream.ssl_read(buf).or_else(|e| match e.code() {
-                ErrorCode::ZERO_RETURN => Ok(0),
-                ErrorCode::WANT_WRITE => {
-                    self.blocked = Some(Blocked::Write);
-                    Err(e)
-                },
-                _ => Err(e),
-            }).map_err(|e| io::Error::new(io::ErrorKind::Other, Error::Ssl(e)))
+            self.blocked.set(None);
+
+            let blocked = self.blocked.clone();
+
+            loop {
+                match self.inner.take().expect("Inner exists!") {
+                    OpensslStreamInner::Connecting(stream) => {
+                        match stream.handshake() {
+                            Ok(stream) => {
+                                debug!("read - Resolved handshake, connected stream!");
+                                self.inner = Some(OpensslStreamInner::Connected(stream));
+                                return Err(io::Error::new(io::ErrorKind::WouldBlock, Error::SslHandshake));
+                            },
+                            Err(HandshakeError::WouldBlock(stream)) => {
+                                debug!("read - Handshake would block!");
+                                self.inner = Some(OpensslStreamInner::Connecting(stream));
+                                blocked.set(Some(Blocked::Write));
+                                return Err(io::Error::new(io::ErrorKind::WouldBlock, Error::SslHandshake));
+                            },
+                            Err(err) => {
+                                debug!("read - unknown error during handshake: {:?}!", err);
+                                return Err(io::Error::new(io::ErrorKind::Other, Error::SslHandshake));
+                            }
+                        }
+                    },
+                    OpensslStreamInner::Connected(mut stream) => {
+                        // TODO (Darren): ask Joe if this is the right way to fix this ownership problem
+                        let result = stream.ssl_read(buf);
+                        self.inner = Some(OpensslStreamInner::Connected(stream));
+                        return result.or_else(|e| match e.code() {
+                            ErrorCode::ZERO_RETURN => Ok(0),
+                            ErrorCode::WANT_WRITE => {
+                                blocked.set(Some(Blocked::Write));
+                                Err(e)
+                            },
+                            _ => Err(e),
+                        }).map_err(|e| {
+                            debug!("read - connected error: {:?}", e);
+                            match e.code() {
+                                ErrorCode::WANT_WRITE => io::Error::new(io::ErrorKind::WouldBlock, Error::Ssl(e)),
+                                _ => io::Error::new(io::ErrorKind::Other, Error::Ssl(e)),
+                            }
+                        });
+                    }
+                }
+            }
         }
     }
 
-    impl<T: super::Transport> io::Write for OpensslStream<T> {
+    impl<T: super::Transport + Debug> io::Write for OpensslStream<T> {
         fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.blocked = None;
-            self.stream.ssl_write(buf).or_else(|e| match e.code() {
-                ErrorCode::ZERO_RETURN => Ok(0),
-                ErrorCode::WANT_READ => {
-                    self.blocked = Some(Blocked::Read);
-                    Err(e)
-                },
-                _ => Err(e),
-            }).map_err(|e| io::Error::new(io::ErrorKind::Other, Error::Ssl(e)))
+            self.blocked.set(None);
+
+            let blocked = self.blocked.clone();
+
+            loop {
+                match self.inner.take().expect("Inner exists!") {
+                    OpensslStreamInner::Connecting(stream) => {
+                        match stream.handshake() {
+                            Ok(stream) => {
+                                debug!("write - Resolved handshake, connected stream!");
+                                self.inner = Some(OpensslStreamInner::Connected(stream));
+                                return Err(io::Error::new(io::ErrorKind::WouldBlock, Error::SslHandshake));
+                            },
+                            Err(HandshakeError::WouldBlock(stream)) => {
+                                debug!("write - Handshake would block!");
+                                self.inner = Some(OpensslStreamInner::Connecting(stream));
+                                blocked.set(Some(Blocked::Read));
+                                return Err(io::Error::new(io::ErrorKind::WouldBlock, Error::SslHandshake));
+                            },
+                            Err(err) => {
+                                debug!("write - unknown error during handshake: {:?}!", err);
+                                return Err(io::Error::new(io::ErrorKind::Other, Error::SslHandshake));
+                            }
+                        }
+                    },
+                    OpensslStreamInner::Connected(mut stream) => {
+                        // TODO (Darren): ask Joe if this is the right way to fix this ownership problem
+                        let result = stream.ssl_write(buf);
+                        self.inner = Some(OpensslStreamInner::Connected(stream));
+                        return result.or_else(|e| match e.code() {
+                            ErrorCode::ZERO_RETURN => Ok(0),
+                            ErrorCode::WANT_READ => {
+                                blocked.set(Some(Blocked::Read));
+                                Err(e)
+                            },
+                            _ => Err(e),
+                        }).map_err(|e| {
+                            debug!("write - connected error: {:?}", e);
+                            match e.code() {
+                                ErrorCode::WANT_READ => io::Error::new(io::ErrorKind::WouldBlock, Error::Ssl(e)),
+                                _ => io::Error::new(io::ErrorKind::Other, Error::Ssl(e)),
+                            }
+                        });
+                    }
+                }
+            }
         }
 
         fn flush(&mut self) -> io::Result<()> {
-            self.stream.flush()
+            match self.inner.as_mut().expect("Inner exists!") {
+                &mut OpensslStreamInner::Connecting(ref mut stream) => stream.get_mut().flush(),
+                &mut OpensslStreamInner::Connected(ref mut stream) => stream.flush(),
+            }
         }
     }
 
 
-    impl<T: super::Transport> Evented for OpensslStream<T> {
+    impl<T: super::Transport + Debug> Evented for OpensslStream<T> {
         #[inline]
         fn register(&self, selector: &mut Selector, token: Token, interest: EventSet, opts: PollOpt) -> io::Result<()> {
-            self.stream.get_ref().register(selector, token, interest, opts)
+            self.inner_stream_ref().register(selector, token, interest, opts)
         }
 
         #[inline]
         fn reregister(&self, selector: &mut Selector, token: Token, interest: EventSet, opts: PollOpt) -> io::Result<()> {
-            self.stream.get_ref().reregister(selector, token, interest, opts)
+            self.inner_stream_ref().reregister(selector, token, interest, opts)
         }
 
         #[inline]
         fn deregister(&self, selector: &mut Selector) -> io::Result<()> {
-            self.stream.get_ref().deregister(selector)
+            self.inner_stream_ref().deregister(selector)
         }
     }
 
-    impl<T: super::Transport> ::vecio::Writev for OpensslStream<T> {
+    impl<T: super::Transport + Debug> ::vecio::Writev for OpensslStream<T> {
         fn writev(&mut self, bufs: &[&[u8]]) -> io::Result<usize> {
             let vec = bufs.concat();
             self.write(&vec)
         }
     }
 
-    impl<T: super::Transport> super::Transport for OpensslStream<T> {
+    impl<T: super::Transport + Debug> super::Transport for OpensslStream<T> {
         fn take_socket_error(&mut self) -> io::Result<()> {
-            self.stream.get_mut().take_socket_error()
+            self.inner_stream_mut().take_socket_error()
         }
 
         fn blocked(&self) -> Option<super::Blocked> {
-            self.blocked
+            self.blocked.get()
         }
     }
 }
+
 
 #[cfg(feature = "security-framework")]
 mod security_framework {

@@ -35,7 +35,6 @@ extern crate vecio;
 
 extern crate c_ares_experiment;
 
-#[macro_use]
 extern crate language_tags;
 
 #[macro_use]

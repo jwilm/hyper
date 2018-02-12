@@ -147,13 +147,8 @@ impl From<ErrorStack> for Error {
     }
 }
 
-extern crate backtrace;
-use self::backtrace::Backtrace;
-
 impl From<HandshakeError<HttpStream>> for Error {
     fn from(_err: HandshakeError<HttpStream>) -> Error {
-        debug!("HandshakeError: {}", _err);
-        debug!("Backtrace: {:?}", Backtrace::new());
         // NOTE (darren): discard the error right now
         // as it does not implement Sync
         SslHandshake
