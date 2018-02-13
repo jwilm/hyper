@@ -433,9 +433,7 @@ pub type DefaultTransport = <DefaultConnector as Connect>::Output;
 #[cfg(feature = "openssl")]
 mod openssl {
     use std::io::{self, Write};
-    use std::cell::Cell;
     use std::path::Path;
-    use std::rc::Rc;
 
     use rotor::mio::{Selector, Token, Evented, EventSet, PollOpt};
 
@@ -574,20 +572,20 @@ mod openssl {
     #[derive(Debug)]
     pub struct OpensslStream<T> where T: Debug {
         inner: Option<OpensslStreamInner<T>>,
-        blocked: Rc<Cell<Option<Blocked>>>,
+        blocked: Option<Blocked>,
     }
 
     fn mid_openssl_stream<T: Debug>(stream: MidHandshakeSslStream<T>) -> OpensslStream<T> {
         OpensslStream {
             inner: Some(OpensslStreamInner::Connecting(stream)),
-            blocked: Rc::new(Cell::new(None)),
+            blocked: None,
         }
     }
 
     fn openssl_stream<T: Debug>(stream: SslStream<T>) -> OpensslStream<T> {
         OpensslStream {
             inner: Some(OpensslStreamInner::Connected(stream)),
-            blocked: Rc::new(Cell::new(None)),
+            blocked: None,
         }
     }
 
@@ -609,9 +607,7 @@ mod openssl {
 
     impl<T: super::Transport + Debug> io::Read for OpensslStream<T> {
         fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            self.blocked.set(None);
-
-            let blocked = self.blocked.clone();
+            self.blocked = None;
 
             loop {
                 match self.inner.take().expect("Inner exists!") {
@@ -625,7 +621,7 @@ mod openssl {
                             Err(HandshakeError::WouldBlock(stream)) => {
                                 debug!("read - Handshake would block!");
                                 self.inner = Some(OpensslStreamInner::Connecting(stream));
-                                blocked.set(Some(Blocked::Write));
+                                self.blocked = Some(Blocked::Write);
                                 return Err(io::Error::new(io::ErrorKind::WouldBlock, Error::SslHandshake));
                             },
                             Err(err) => {
@@ -641,18 +637,20 @@ mod openssl {
                         return result.or_else(|e| match e.code() {
                             ErrorCode::ZERO_RETURN => Ok(0),
                             ErrorCode::WANT_WRITE => {
-                                blocked.set(Some(Blocked::Write));
+                                self.blocked = Some(Blocked::Write);
                                 Err(e)
                             },
                             ErrorCode::WANT_READ => {
-                                blocked.set(Some(Blocked::Read));
+                                self.blocked = Some(Blocked::Read);
                                 Err(e)
                             },
                             _ => Err(e),
                         }).map_err(|e| {
                             debug!("read - connected error: {:?}", e);
                             match e.code() {
-                                ErrorCode::WANT_WRITE | ErrorCode::WANT_READ => io::Error::new(io::ErrorKind::WouldBlock, Error::Ssl(e)),
+                                ErrorCode::WANT_WRITE | ErrorCode::WANT_READ => {
+                                    io::Error::new(io::ErrorKind::WouldBlock, Error::Ssl(e))
+                                },
                                 _ => io::Error::new(io::ErrorKind::Other, Error::Ssl(e)),
                             }
                         });
@@ -664,9 +662,7 @@ mod openssl {
 
     impl<T: super::Transport + Debug> io::Write for OpensslStream<T> {
         fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.blocked.set(None);
-
-            let blocked = self.blocked.clone();
+            self.blocked = None;
 
             loop {
                 match self.inner.take().expect("Inner exists!") {
@@ -680,7 +676,7 @@ mod openssl {
                             Err(HandshakeError::WouldBlock(stream)) => {
                                 debug!("write - Handshake would block!");
                                 self.inner = Some(OpensslStreamInner::Connecting(stream));
-                                blocked.set(Some(Blocked::Read));
+                                self.blocked = Some(Blocked::Read);
                                 return Err(io::Error::new(io::ErrorKind::WouldBlock, Error::SslHandshake));
                             },
                             Err(err) => {
@@ -696,11 +692,11 @@ mod openssl {
                         return result.or_else(|e| match e.code() {
                             ErrorCode::ZERO_RETURN => Ok(0),
                             ErrorCode::WANT_READ => {
-                                blocked.set(Some(Blocked::Read));
+                                self.blocked = Some(Blocked::Read);
                                 Err(e)
                             },
                             ErrorCode::WANT_WRITE => {
-                                blocked.set(Some(Blocked::Write));
+                                self.blocked = Some(Blocked::Write);
                                 Err(e)
                             },
                             _ => Err(e),
@@ -755,7 +751,7 @@ mod openssl {
         }
 
         fn blocked(&self) -> Option<super::Blocked> {
-            self.blocked.get()
+            self.blocked.clone()
         }
     }
 }
