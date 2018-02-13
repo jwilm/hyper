@@ -433,8 +433,8 @@ pub type DefaultTransport = <DefaultConnector as Connect>::Output;
 #[cfg(feature = "openssl")]
 mod openssl {
     use std::io::{self, Write};
-    use std::path::Path;
     use std::fmt;
+    use std::path::Path;
 
     use rotor::mio::{Selector, Token, Evented, EventSet, PollOpt};
 
@@ -656,6 +656,10 @@ mod openssl {
                             self.blocked = Some(Blocked::Write);
                             Err(io::Error::new(io::ErrorKind::WouldBlock, Error::Ssl(e)))
                         },
+                        ErrorCode::WANT_READ => {
+                            self.blocked = Some(Blocked::Read);
+                            Err(io::Error::new(io::ErrorKind::WouldBlock, Error::Ssl(e)))
+                        },
                         _ => Err(io::Error::new(io::ErrorKind::Other, Error::Ssl(e))),
                     })
                 }
@@ -678,6 +682,10 @@ mod openssl {
                         ErrorCode::ZERO_RETURN => Ok(0),
                         ErrorCode::WANT_READ => {
                             self.blocked = Some(Blocked::Read);
+                            Err(io::Error::new(io::ErrorKind::WouldBlock, Error::Ssl(e)))
+                        },
+                        ErrorCode::WANT_WRITE => {
+                            self.blocked = Some(Blocked::Write);
                             Err(io::Error::new(io::ErrorKind::WouldBlock, Error::Ssl(e)))
                         },
                         _ => Err(io::Error::new(io::ErrorKind::Other, Error::Ssl(e))),
