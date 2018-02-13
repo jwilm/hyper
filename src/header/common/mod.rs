@@ -122,8 +122,8 @@ macro_rules! __hyper__tm {
         mod $tm{
             use std::str;
             use $crate::header::*;
-            use $crate::mime::*;
             use $crate::method::Method;
+            use $crate::mime::*;
             use super::$id as HeaderField;
             $($tf)*
         }
@@ -137,7 +137,6 @@ macro_rules! test_header {
     ($id:ident, $raw:expr) => {
         #[test]
         fn $id() {
-            use std::ascii::AsciiExt;
             let raw = $raw;
             let a: Vec<Vec<u8>> = raw.iter().map(|x| x.to_vec()).collect();
             let a = a.into();
@@ -369,6 +368,10 @@ macro_rules! header {
 }
 
 
+mod accept_charset;
+mod accept_encoding;
+mod accept_language;
+mod accept_ranges;
 mod accept;
 mod access_control_allow_credentials;
 mod access_control_allow_headers;
@@ -378,14 +381,9 @@ mod access_control_expose_headers;
 mod access_control_max_age;
 mod access_control_request_headers;
 mod access_control_request_method;
-mod accept_charset;
-mod accept_encoding;
-mod accept_language;
-mod accept_ranges;
 mod allow;
 mod authorization;
 mod cache_control;
-mod cookie;
 mod connection;
 mod content_disposition;
 mod content_encoding;
@@ -394,6 +392,7 @@ mod content_length;
 mod content_location;
 mod content_range;
 mod content_type;
+mod cookie;
 mod date;
 mod etag;
 mod expect;

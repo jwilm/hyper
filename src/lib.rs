@@ -35,7 +35,10 @@ extern crate vecio;
 
 extern crate c_ares_experiment;
 
-#[macro_use]
+#[cfg(test)]
+#[macro_use] // macro use for tests
+extern crate language_tags;
+#[cfg(not(test))]
 extern crate language_tags;
 
 #[macro_use]

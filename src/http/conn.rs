@@ -9,9 +9,9 @@ use std::time::Duration;
 use rotor::{self, EventSet, PollOpt, Scope, Time};
 
 use http::{self, h1, Http1Message, Encoder, Decoder, Next, Next_, Reg, Control};
+use http::buffer::Buffer;
 use http::channel;
 use http::internal::WriteBuf;
-use http::buffer::Buffer;
 use net::{Transport, Blocked};
 use version::HttpVersion;
 
@@ -162,7 +162,7 @@ impl<K: Key, T: Transport, H: MessageHandler<T>> ConnInner<K, T, H> {
                             return state;
                         },
                         _ => {
-                            debug!("io error trying to parse {:?}", e);
+                            debug!("io error trying to parse during read::Init {:?}", e);
                             return State::Closed;
                         }
                     },
@@ -301,7 +301,7 @@ impl<K: Key, T: Transport, H: MessageHandler<T>> ConnInner<K, T, H> {
                                 None
                             },
                             _ => {
-                                debug!("io error trying to parse {:?}", e);
+                                debug!("io error trying to parse during read::Http1 {:?}", e);
                                 return State::Closed;
                             }
                         },
