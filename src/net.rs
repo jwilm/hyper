@@ -478,7 +478,10 @@ mod openssl {
                 SslOptions::NO_SSLV3 |
                 SslOptions::NO_COMPRESSION
             );
-            ctx.set_mode(SslMode::ENABLE_PARTIAL_WRITE);
+            ctx.set_mode(
+                SslMode::ENABLE_PARTIAL_WRITE |
+                SslMode::ACCEPT_MOVING_WRITE_BUFFER
+            );
 
             // cipher list taken from curl:
             // https://github.com/curl/curl/blob/5bf5f6ebfcede78ef7c2b16daa41c4b7ba266087/lib/vtls/openssl.h#L120
