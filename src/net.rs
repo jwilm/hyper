@@ -441,7 +441,7 @@ mod openssl {
     use error::Error;
     use openssl::error::ErrorStack;
     use openssl::ssl::{ErrorCode, SslVerifyMode, Ssl, SslFiletype,
-        SslContext, SslMethod, SslStream, SslOptions, HandshakeError};
+        SslContext, SslMethod, SslStream, SslMode, SslOptions, HandshakeError};
 
     use super::{HttpStream, Blocked};
 
@@ -473,7 +473,13 @@ mod openssl {
         fn default() -> OpensslClient {
             let mut ctx = SslContext::builder(SslMethod::tls()).unwrap();
             ctx.set_default_verify_paths().unwrap();
-            ctx.set_options(SslOptions::NO_SSLV2 | SslOptions::NO_SSLV3 | SslOptions::NO_COMPRESSION);
+            ctx.set_options(
+                SslOptions::NO_SSLV2 |
+                SslOptions::NO_SSLV3 |
+                SslOptions::NO_COMPRESSION
+            );
+            ctx.set_mode(SslMode::ENABLE_PARTIAL_WRITE);
+
             // cipher list taken from curl:
             // https://github.com/curl/curl/blob/5bf5f6ebfcede78ef7c2b16daa41c4b7ba266087/lib/vtls/openssl.h#L120
             ctx.set_cipher_list("ALL!EXPORT!EXPORT40!EXPORT56!aNULL!LOW!RC4@STRENGTH").unwrap();
