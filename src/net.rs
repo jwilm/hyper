@@ -472,6 +472,7 @@ mod openssl {
     impl Default for OpensslClient {
         fn default() -> OpensslClient {
             let mut ctx = SslContext::builder(SslMethod::tls()).unwrap();
+            println!("Openssl client??");
             ctx.set_default_verify_paths().unwrap();
             ctx.set_options(
                 SslOptions::NO_SSLV2 |
@@ -524,12 +525,14 @@ mod openssl {
 
     impl Default for Openssl {
         fn default() -> Openssl {
+            let mut ctx = SslContext::builder(SslMethod::tls()).unwrap();
+            ctx.set_mode(
+                SslMode::ENABLE_PARTIAL_WRITE |
+                SslMode::ACCEPT_MOVING_WRITE_BUFFER
+            );
+            println!("Openssl??");
             Openssl {
-                context: SslContext::builder(SslMethod::tls()).unwrap_or_else(|e| {
-                    // if we cannot create a SslContext, that's because of a
-                    // serious problem. just crash.
-                    panic!("{}", e)
-                }).build()
+                context: ctx.build()
             }
         }
     }
