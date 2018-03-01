@@ -472,7 +472,6 @@ mod openssl {
     impl Default for OpensslClient {
         fn default() -> OpensslClient {
             let mut ctx = SslContext::builder(SslMethod::tls()).unwrap();
-            println!("Openssl client??");
             ctx.set_default_verify_paths().unwrap();
             ctx.set_options(
                 SslOptions::NO_SSLV2 |
@@ -530,7 +529,6 @@ mod openssl {
                 SslMode::ENABLE_PARTIAL_WRITE |
                 SslMode::ACCEPT_MOVING_WRITE_BUFFER
             );
-            println!("Openssl??");
             Openssl {
                 context: ctx.build()
             }
