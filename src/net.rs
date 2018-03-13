@@ -600,17 +600,31 @@ mod openssl {
     }
 
     impl<T: super::Transport> OpensslStream<T> {
-        fn inner_stream_ref(&self) -> &T {
+        fn inner_stream_ref(&self) -> io::Result<&T> {
+            if self.inner.is_none() {
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    "Inner stream ref does not exist - stream probably errored during handshake!"
+                ));
+            }
+
             match *self.inner.as_ref().expect("Inner exists!") {
-                OpensslStreamInner::Connecting(ref stream) => stream.get_ref(),
-                OpensslStreamInner::Connected(ref stream) => stream.get_ref(),
+                OpensslStreamInner::Connecting(ref stream) => Ok(stream.get_ref()),
+                OpensslStreamInner::Connected(ref stream) => Ok(stream.get_ref()),
             }
         }
 
-        fn inner_stream_mut(&mut self) -> &mut T {
+        fn inner_stream_mut(&mut self) -> io::Result<&mut T> {
+            if self.inner.is_none() {
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    "Inner stream mut ref does not exist - stream probably errored during handshake!"
+                ));
+            }
+
             match *self.inner.as_mut().expect("Inner exists!") {
-                OpensslStreamInner::Connecting(ref mut stream) => stream.get_mut(),
-                OpensslStreamInner::Connected(ref mut stream) => stream.get_mut(),
+                OpensslStreamInner::Connecting(ref mut stream) => Ok(stream.get_mut()),
+                OpensslStreamInner::Connected(ref mut stream) => Ok(stream.get_mut()),
             }
         }
     }
@@ -641,10 +655,12 @@ mod openssl {
                 Err(io::Error::new(io::ErrorKind::WouldBlock, Error::SslHandshake))
             },
             Err(HandshakeError::SetupFailure(e)) => {
+                debug!("{} - Handshake setup failure", op);
                 Err(io::Error::new(io::ErrorKind::Other, Error::SslStack(e)))
             },
-            Err(HandshakeError::Failure(f)) => {
-                Err(io::Error::new(io::ErrorKind::Other, Error::Ssl(f.into_error())))
+            Err(HandshakeError::Failure(stream)) => {
+                debug!("{} - Handshake failure", op);
+                Err(io::Error::new(io::ErrorKind::Other, Error::Ssl(stream.into_error())))
             },
         }
     }
@@ -705,24 +721,24 @@ mod openssl {
         }
 
         fn flush(&mut self) -> io::Result<()> {
-            self.inner_stream_mut().flush()
+            self.inner_stream_mut()?.flush()
         }
     }
 
     impl<T: super::Transport> Evented for OpensslStream<T> {
         #[inline]
         fn register(&self, selector: &mut Selector, token: Token, interest: EventSet, opts: PollOpt) -> io::Result<()> {
-            self.inner_stream_ref().register(selector, token, interest, opts)
+            self.inner_stream_ref()?.register(selector, token, interest, opts)
         }
 
         #[inline]
         fn reregister(&self, selector: &mut Selector, token: Token, interest: EventSet, opts: PollOpt) -> io::Result<()> {
-            self.inner_stream_ref().reregister(selector, token, interest, opts)
+            self.inner_stream_ref()?.reregister(selector, token, interest, opts)
         }
 
         #[inline]
         fn deregister(&self, selector: &mut Selector) -> io::Result<()> {
-            self.inner_stream_ref().deregister(selector)
+            self.inner_stream_ref()?.deregister(selector)
         }
     }
 
@@ -735,7 +751,7 @@ mod openssl {
 
     impl<T: super::Transport + fmt::Debug> super::Transport for OpensslStream<T> {
         fn take_socket_error(&mut self) -> io::Result<()> {
-            self.inner_stream_mut().take_socket_error()
+            self.inner_stream_mut()?.take_socket_error()
         }
 
         fn blocked(&self) -> Option<super::Blocked> {
